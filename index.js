@@ -3,6 +3,8 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const { MongoClient, ServerApiVersion } = require('mongodb');
 
+const stripe = require('stripe')(process.env.PAYMENT_GATEWAY_KEY);
+
 // Load environment variables from .env file
 dotenv.config();
 const app = express();
@@ -39,6 +41,24 @@ async function run() {
   }
 }
 run().catch(console.dir);
+
+
+// Stripe Account
+
+// Requires: stripe npm installed, secret key set
+app.post("/create-payment-intent", async (req, res) => {
+  const { amount } = req.body;
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount,
+    currency: "usd",
+    payment_method_types: ["card"],
+  });
+
+  res.send({ clientSecret: paymentIntent.client_secret });
+});
+
+
 
 
 // Sample route
