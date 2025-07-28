@@ -409,39 +409,70 @@ app.post("/api/comments/:commentId/report", async (req, res) => {
 // Vote on a post
 app.post("/posts/:id/vote", async (req, res) => {
   try {
+    console.log('Vote request received:', {
+      params: req.params,
+      body: req.body,
+      headers: req.headers
+    });
+    
     const postId = req.params.id;
-    const { voteType } = req.body; // 'upvote' or 'downvote'
+    const { voteType, userId } = req.body; // 'upvote' or 'downvote'
 
     if (!["upvote", "downvote"].includes(voteType)) {
+      console.log('Invalid vote type:', voteType);
       return res.status(400).json({ error: "Invalid vote type" });
     }
 
+    if (!userId) {
+      console.log('No userId provided');
+      return res.status(401).json({ error: "User not authenticated" });
+    }
+
+    console.log('Finding post:', postId);
     const post = await postsCollection.findOne({ _id: new ObjectId(postId) });
     if (!post) {
+      console.log('Post not found:', postId);
       return res.status(404).json({ error: "Post not found" });
     }
 
-    // In a real app, you'd check if user already voted
-    // For now, just update the vote counts
-    if (voteType === "upvote") {
+    // Initialize votes object if it doesn't exist
+    if (!post.votes) {
       await postsCollection.updateOne(
         { _id: new ObjectId(postId) },
-        { $inc: { upVote: 1 } }
-      );
-      await postsCollection.updateOne(
-        { _id: new ObjectId(postId) },
-        { $set: { userVote: "upvote" } }
-      );
-    } else {
-      await postsCollection.updateOne(
-        { _id: new ObjectId(postId) },
-        { $inc: { downVote: 1 } }
-      );
-      await postsCollection.updateOne(
-        { _id: new ObjectId(postId) },
-        { $set: { userVote: "downvote" } }
+        { $set: { votes: {} } }
       );
     }
+
+    const userVote = post.votes?.[userId];
+    let update = {};
+
+    if (userVote === voteType) {
+      // User is clicking the same vote again, so remove their vote
+      update = {
+        $inc: { [voteType === 'upvote' ? 'upVote' : 'downVote']: -1 },
+        $unset: { [`votes.${userId}`]: "" }
+      };
+    } else if (userVote) {
+      // User is changing their vote
+      update = {
+        $inc: {
+          [voteType === 'upvote' ? 'upVote' : 'downVote']: 1,
+          [userVote === 'upvote' ? 'upVote' : 'downVote']: -1
+        },
+        $set: { [`votes.${userId}`]: voteType }
+      };
+    } else {
+      // User is voting for the first time
+      update = {
+        $inc: { [voteType === 'upvote' ? 'upVote' : 'downVote']: 1 },
+        $set: { [`votes.${userId}`]: voteType }
+      };
+    }
+
+    await postsCollection.updateOne(
+      { _id: new ObjectId(postId) },
+      update
+    );
 
     res.json({
       upVote: post.upVote,
@@ -600,6 +631,30 @@ app.post("/api/users/profile", async (req, res) => {
   } catch (error) {
     console.error("Error updating user profile:", error);
     res.status(500).json({ error: "Failed to update user profile" });
+  }
+});
+
+// Test endpoint
+app.get("/test", (req, res) => {
+  res.send("Server is running");
+});
+
+// Test MongoDB connection
+app.get("/test-mongo", async (req, res) => {
+  try {
+    const count = await postsCollection.countDocuments({});
+    res.json({
+      success: true,
+      postCount: count,
+      message: `Successfully connected to MongoDB. Found ${count} posts.`
+    });
+  } catch (error) {
+    console.error('MongoDB test error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to connect to MongoDB',
+      details: error.message
+    });
   }
 });
 
