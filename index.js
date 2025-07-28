@@ -138,7 +138,8 @@ app.get("/posts", async (req, res) => {
   }
 });
 
-// Create a new post with post limit logic
+
+// Create a new post with post limit logics
 app.post("/posts", async (req, res) => {
   try {
     const { title, description, tags, authorName, authorImage } = req.body;
