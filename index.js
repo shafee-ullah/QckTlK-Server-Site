@@ -290,19 +290,22 @@ app.get("/posts/:id/comments", async (req, res) => {
 app.post("/posts/:id/comments", async (req, res) => {
   try {
     const postId = req.params.id;
-    const { comment } = req.body;
+    const { comment, authorName, authorEmail, authorImage } = req.body;
 
     if (!comment || !comment.trim()) {
       return res.status(400).json({ error: "Comment is required" });
     }
 
+    if (!authorName || !authorEmail) {
+      return res.status(400).json({ error: "Author information is required" });
+    }
+
     const newComment = {
       postId: new ObjectId(postId),
       comment: comment.trim(),
-      authorName: "Current User", // In real app, get from auth
-      authorEmail: "user@example.com",
-      authorImage:
-        "https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=150&h=150&fit=crop&crop=face",
+      authorName: authorName,
+      authorEmail: authorEmail,
+      authorImage: authorImage || "/default-avatar.svg",
       createdAt: new Date(),
     };
 
