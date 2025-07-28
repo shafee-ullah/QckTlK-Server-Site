@@ -71,20 +71,50 @@ app.get("/posts", async (req, res) => {
     const {
       search = "",
       tag = "",
+      author = "",
+      startDate = "",
+      endDate = "",
       sort = "new",
       page = 1,
       limit = 10,
+      lastId = null,
     } = req.query;
     const query = {};
+
+    // Text search (title and description)
     if (search) {
       query.$or = [
         { title: { $regex: search, $options: "i" } },
         { description: { $regex: search, $options: "i" } },
       ];
     }
+
+    // Tag filter
     if (tag) {
       query.tags = tag;
     }
+
+    // Author filter
+    if (author) {
+      query.authorName = { $regex: author, $options: "i" };
+    }
+
+    // Date range filter
+    if (startDate || endDate) {
+      query.postTime = {};
+      if (startDate) {
+        query.postTime.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        query.postTime.$lte = new Date(endDate);
+      }
+    }
+
+    // For infinite scroll, use cursor-based pagination
+    if (lastId) {
+      query._id = { $lt: new ObjectId(lastId) };
+    }
+
     let cursor = postsCollection.find(query);
     if (sort === "new") {
       cursor = cursor.sort({ postTime: -1 });
@@ -92,19 +122,106 @@ app.get("/posts", async (req, res) => {
       cursor = cursor.sort({ upVote: -1, downVote: 1 });
     }
     const total = await cursor.count();
-    const paginatedPosts = await cursor
-      .skip((page - 1) * limit)
-      .limit(Number(limit))
-      .toArray();
+    const paginatedPosts = await cursor.limit(Number(limit)).toArray();
     res.json({
       data: paginatedPosts,
       total,
-      page: Number(page),
-      totalPages: Math.ceil(total / limit),
+      hasMore: paginatedPosts.length === Number(limit),
+      lastId:
+        paginatedPosts.length > 0
+          ? paginatedPosts[paginatedPosts.length - 1]._id
+          : null,
     });
   } catch (error) {
     console.error("Error fetching posts:", error);
     res.status(500).json({ error: "Failed to fetch posts" });
+  }
+});
+
+// Create a new post with post limit logic
+app.post("/posts", async (req, res) => {
+  try {
+    const { title, description, tags, authorName, authorImage } = req.body;
+
+    if (!title || !description || !authorName) {
+      return res
+        .status(400)
+        .json({ error: "Title, description, and author name are required" });
+    }
+
+    // Check user's membership and post count
+    const user = await usersCollection.findOne({ email: authorName });
+    const userPostsCount = await postsCollection.countDocuments({
+      authorName,
+    });
+
+    // Free users can only post 5 times (including new users who don't exist in usersCollection yet)
+    if ((!user || user.membership !== "gold") && userPostsCount >= 5) {
+      return res.status(403).json({
+        error:
+          "You have reached your post limit. Upgrade to Gold membership for unlimited posts.",
+      });
+    }
+
+    const newPost = {
+      title,
+      description,
+      tags: tags || [],
+      authorName,
+      authorImage: authorImage || "/default-avatar.png",
+      postTime: new Date(),
+      upVote: 0,
+      downVote: 0,
+      commentCount: 0,
+    };
+
+    const result = await postsCollection.insertOne(newPost);
+    res.status(201).json({
+      message: "Post created successfully",
+      postId: result.insertedId,
+    });
+  } catch (error) {
+    console.error("Error creating post:", error);
+    res.status(500).json({ error: "Failed to create post" });
+  }
+});
+
+// Delete a post (only by the author)
+app.delete("/posts/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { authorName } = req.body; // In a real app, this would come from auth token
+
+    if (!authorName) {
+      return res.status(400).json({ error: "Author name is required" });
+    }
+
+    // Validate ObjectId format
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid post ID format" });
+    }
+
+    const post = await postsCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!post) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    if (post.authorName !== authorName) {
+      return res
+        .status(403)
+        .json({ error: "You can only delete your own posts" });
+    }
+
+    await postsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    // Also delete associated comments
+    await commentsCollection.deleteMany({ postId: id });
+
+    res.json({ message: "Post deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting post:", error);
+    res.status(500).json({ error: "Failed to delete post" });
   }
 });
 
@@ -137,6 +254,12 @@ app.get("/announcements", async (req, res) => {
 app.get("/posts/:id", async (req, res) => {
   try {
     const postId = req.params.id;
+
+    // Validate ObjectId format
+    if (!ObjectId.isValid(postId)) {
+      return res.status(400).json({ error: "Invalid post ID format" });
+    }
+
     const post = await postsCollection.findOne({ _id: new ObjectId(postId) });
     if (!post) {
       return res.status(404).json({ error: "Post not found" });
@@ -198,6 +321,84 @@ app.post("/posts/:id/comments", async (req, res) => {
   } catch (error) {
     console.error("Error adding comment:", error);
     res.status(500).json({ error: "Failed to add comment" });
+  }
+});
+
+// Delete a comment (only by post author or comment author)
+app.delete("/posts/:postId/comments/:commentId", async (req, res) => {
+  try {
+    const { postId, commentId } = req.params;
+    const { authorName } = req.body; // In real app, this would come from auth token
+
+    if (!authorName) {
+      return res.status(400).json({ error: "Author name is required" });
+    }
+
+    // Check if user is the post author
+    const post = await postsCollection.findOne({ _id: new ObjectId(postId) });
+    if (!post) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    const comment = await commentsCollection.findOne({
+      _id: new ObjectId(commentId),
+    });
+    if (!comment) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
+
+    // Allow deletion if user is post author or comment author
+    if (post.authorName !== authorName && comment.authorName !== authorName) {
+      return res.status(403).json({
+        error:
+          "You can only delete comments on your posts or your own comments",
+      });
+    }
+
+    await commentsCollection.deleteOne({ _id: new ObjectId(commentId) });
+
+    // Update comment count on post
+    await postsCollection.updateOne(
+      { _id: new ObjectId(postId) },
+      { $inc: { commentCount: -1 } }
+    );
+
+    res.json({ message: "Comment deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting comment:", error);
+    res.status(500).json({ error: "Failed to delete comment" });
+  }
+});
+
+// Report a comment
+app.post("/api/comments/:commentId/report", async (req, res) => {
+  try {
+    const { commentId } = req.params;
+    const { reporterEmail, reason } = req.body;
+
+    if (!reporterEmail || !reason) {
+      return res
+        .status(400)
+        .json({ error: "Reporter email and reason are required" });
+    }
+
+    const comment = await commentsCollection.findOne({
+      _id: new ObjectId(commentId),
+    });
+    if (!comment) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
+
+    // In a real app, you'd store reports in a separate collection
+    // For now, we'll just acknowledge the report
+    console.log(
+      `Comment ${commentId} reported by ${reporterEmail} for: ${reason}`
+    );
+
+    res.json({ message: "Comment reported successfully" });
+  } catch (error) {
+    console.error("Error reporting comment:", error);
+    res.status(500).json({ error: "Failed to report comment" });
   }
 });
 
@@ -337,12 +538,64 @@ app.get("/api/users/profile", async (req, res) => {
     }
     const user = await usersCollection.findOne({ email });
     if (!user) {
-      return res.status(404).json({ error: "User not found" });
+      // Create a default user profile if it doesn't exist
+      const defaultUser = {
+        email,
+        displayName: email.split("@")[0], // Use email prefix as display name
+        photoURL: "/default-avatar.svg",
+        membership: "free",
+        badge: null,
+        membershipUpgradedAt: null,
+        createdAt: new Date(),
+      };
+      const result = await usersCollection.insertOne(defaultUser);
+      defaultUser._id = result.insertedId;
+      return res.json(defaultUser);
     }
     res.json(user);
   } catch (error) {
     console.error("Error fetching user profile:", error);
     res.status(500).json({ error: "Failed to fetch user profile" });
+  }
+});
+
+// Create or update user profile
+app.post("/api/users/profile", async (req, res) => {
+  try {
+    const { email, displayName, photoURL } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    const updateData = {
+      email,
+      displayName: displayName || email.split("@")[0],
+      photoURL: photoURL || "/default-avatar.svg",
+      membership: "free",
+      badge: null,
+      membershipUpgradedAt: null,
+      updatedAt: new Date(),
+    };
+
+    // If user doesn't exist, add createdAt
+    const existingUser = await usersCollection.findOne({ email });
+    if (!existingUser) {
+      updateData.createdAt = new Date();
+    }
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: updateData },
+      { upsert: true }
+    );
+
+    res.json({
+      message: "User profile updated successfully",
+      user: updateData,
+    });
+  } catch (error) {
+    console.error("Error updating user profile:", error);
+    res.status(500).json({ error: "Failed to update user profile" });
   }
 });
 
