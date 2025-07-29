@@ -115,6 +115,17 @@ const canUserCreatePost = async (email) => {
   }
 };
 
+// Get total post count
+app.get("/posts/count", async (req, res) => {
+  try {
+    const total = await postsCollection.countDocuments({ status: { $ne: 'deleted' } });
+    res.json({ total });
+  } catch (error) {
+    console.error("Error getting post count:", error);
+    res.status(500).json({ error: "Failed to get post count" });
+  }
+});
+
 // Get popular tags
 app.get("/api/tags/popular", async (req, res) => {
   try {
@@ -136,6 +147,7 @@ app.get("/api/tags/popular", async (req, res) => {
 // Get all posts with search, filter, sort, and pagination
 app.get("/posts", async (req, res) => {
   try {
+    console.log('Incoming request query:', req.query);
     const {
       search = "",
       tag = "",
@@ -144,9 +156,10 @@ app.get("/posts", async (req, res) => {
       endDate = "",
       sort = "new",
       page = 1,
-      limit = 10,
-      lastId = null,
+      limit = 10
     } = req.query;
+    
+    console.log('Parsed sort parameter:', sort);
     const query = {};
 
     // Text search (title and description)
@@ -178,27 +191,95 @@ app.get("/posts", async (req, res) => {
       }
     }
 
-    // For infinite scroll, use cursor-based pagination
-    if (lastId) {
-      query._id = { $lt: new ObjectId(lastId) };
-    }
-
+    // Use offset-based pagination
+    const skip = (Number(page) - 1) * Number(limit);
+    
+    // First, get the total count
+    const total = await postsCollection.countDocuments(query);
+    
+    // Then get the paginated results with proper sorting
     let cursor = postsCollection.find(query);
-    if (sort === "new") {
+    
+    // Log the sort parameter and query for debugging
+    console.log('Sort parameter:', sort);
+    console.log('Query parameters:', { search, tag, author, startDate, endDate, sort, page, limit });
+    
+    // Apply sorting based on sort parameter
+    if (sort === 'popular') {
+      console.log('Sorting by popularity (upVote: -1, postTime: -1)');
+      
+      // Simple sort by upVote (descending) and postTime (descending)
+      cursor = cursor.sort({ upVote: -1, postTime: -1 });
+      
+      // Get all matching posts first
+      const allMatchingPosts = await cursor.toArray();
+      
+      // Apply pagination manually
+      const paginatedPosts = allMatchingPosts.slice(skip, skip + Number(limit));
+      
+      // Log the first few posts to verify sorting
+      console.log('First 3 posts after popularity sort:');
+      paginatedPosts.slice(0, 3).forEach((post, index) => {
+        console.log(`Post ${index + 1}:`, {
+          title: post.title,
+          upVote: post.upVote || 0,
+          downVote: post.downVote || 0,
+          netVotes: (post.upVote || 0) - (post.downVote || 0),
+          postTime: post.postTime
+        });
+      });
+      
+      // Return the paginated results
+      return res.status(200).json({
+        data: paginatedPosts,
+        total: allMatchingPosts.length,
+        totalPages: Math.ceil(allMatchingPosts.length / Number(limit)),
+        currentPage: Number(page),
+        hasMore: skip + paginatedPosts.length < allMatchingPosts.length
+      });
+    } else {
+      // Default: sort by postTime in descending order (newest first)
       cursor = cursor.sort({ postTime: -1 });
-    } else if (sort === "popular") {
-      cursor = cursor.sort({ upVote: -1, downVote: 1 });
+      console.log('Sorting by newest (postTime: -1)');
     }
-    const total = await cursor.count();
-    const paginatedPosts = await cursor.limit(Number(limit)).toArray();
-    res.json({
+    
+    // Apply pagination and get the results
+    const paginatedPosts = await cursor
+      .skip(skip)
+      .limit(Number(limit))
+      .toArray();
+      
+    // Log the first few posts to verify sorting
+    console.log('First 3 posts after sorting:');
+    paginatedPosts.slice(0, 3).forEach((post, index) => {
+      console.log(`Post ${index + 1}:`, {
+        title: post.title,
+        upVote: post.upVote,
+        postTime: post.postTime
+      });
+    });
+      
+    // Calculate if there are more pages
+    const hasMore = skip + paginatedPosts.length < total;
+    const totalPages = Math.ceil(total / Number(limit));
+    
+    console.log('Pagination Info:', {
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      skip,
+      hasMore,
+      totalPages,
+      returnedPosts: paginatedPosts.length
+    });
+    
+    // Return the response in a simpler format that matches client expectations
+    res.status(200).json({
       data: paginatedPosts,
       total,
-      hasMore: paginatedPosts.length === Number(limit),
-      lastId:
-        paginatedPosts.length > 0
-          ? paginatedPosts[paginatedPosts.length - 1]._id
-          : null,
+      totalPages,
+      currentPage: Number(page),
+      hasMore
     });
   } catch (error) {
     console.error("Error fetching posts:", error);
