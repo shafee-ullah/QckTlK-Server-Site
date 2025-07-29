@@ -115,6 +115,24 @@ const canUserCreatePost = async (email) => {
   }
 };
 
+// Get popular tags
+app.get("/api/tags/popular", async (req, res) => {
+  try {
+    const popularTags = await postsCollection.aggregate([
+      { $unwind: "$tags" },
+      { $group: { _id: "$tags", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+      { $project: { _id: 0, name: "$_id", count: 1 } }
+    ]).toArray();
+    
+    res.json(popularTags);
+  } catch (error) {
+    console.error("Error fetching popular tags:", error);
+    res.status(500).json({ error: "Failed to fetch popular tags" });
+  }
+});
+
 // Get all posts with search, filter, sort, and pagination
 app.get("/posts", async (req, res) => {
   try {
