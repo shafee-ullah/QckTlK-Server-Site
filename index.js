@@ -4,6 +4,9 @@ const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const { ObjectId } = require("mongodb");
 
+// Constants
+const FREE_USER_POST_LIMIT = 5;
+
 // Load environment variables from .env file
 dotenv.config();
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
@@ -64,6 +67,53 @@ const tagsCollection = db.collection("tags");
 const announcementsCollection = db.collection("announcements");
 const usersCollection = db.collection("users");
 const paymentsCollection = db.collection("payments");
+
+// Get user's post count
+app.get("/posts/user/:email/count", async (req, res) => {
+  try {
+    const { email } = req.params;
+    
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    const count = await postsCollection.countDocuments({ 
+      authorEmail: email,
+      status: { $ne: 'deleted' } // Don't count deleted posts
+    });
+
+    res.json({ count });
+  } catch (error) {
+    console.error("Error counting user posts:", error);
+    res.status(500).json({ error: "Failed to count user posts" });
+  }
+});
+
+// Check if user can create a post (for free users with post limit)
+const canUserCreatePost = async (email) => {
+  try {
+    // Check if user is premium
+    const user = await usersCollection.findOne({ email });
+    if (user?.membership === 'premium') {
+      return { canPost: true };
+    }
+
+    // For free users, check post count
+    const postCount = await postsCollection.countDocuments({ 
+      authorEmail: email,
+      status: { $ne: 'deleted' }
+    });
+
+    return {
+      canPost: postCount < FREE_USER_POST_LIMIT,
+      postCount,
+      limit: FREE_USER_POST_LIMIT
+    };
+  } catch (error) {
+    console.error("Error checking post limit:", error);
+    throw new Error("Failed to check post limit");
+  }
+};
 
 // Get all posts with search, filter, sort, and pagination
 app.get("/posts", async (req, res) => {
@@ -267,10 +317,6 @@ app.get("/posts/:id", async (req, res) => {
     }
     res.json(post);
   } catch (error) {
-    console.error("Error fetching post:", error);
-    res.status(500).json({ error: "Failed to fetch post" });
-  }
-});
 
 // Get comments for a post
 app.get("/posts/:id/comments", async (req, res) => {
@@ -284,6 +330,51 @@ app.get("/posts/:id/comments", async (req, res) => {
   } catch (error) {
     console.error("Error fetching comments:", error);
     res.status(500).json({ error: "Failed to fetch comments" });
+  }
+});
+
+// Create a new post
+app.post("/posts", async (req, res) => {
+  try {
+    const post = req.body;
+    
+    // Check if user can create a new post
+    const canPost = await canUserCreatePost(post.authorEmail);
+    if (!canPost.canPost) {
+      return res.status(403).json({
+        error: `Free users are limited to ${FREE_USER_POST_LIMIT} posts. Upgrade to premium for unlimited posts.`,
+        limitReached: true,
+        postCount: canPost.postCount,
+        limit: canPost.limit
+      });
+    }
+
+    const result = await postsCollection.insertOne({
+      ...post,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      upvotes: 0,
+      downvotes: 0,
+      views: 0,
+      status: 'active',
+      tags: Array.isArray(post.tags) ? post.tags : post.tags?.split(',').map(tag => tag.trim()) || []
+    });
+    
+    // Update the post count in the response
+    const updatedCount = await postsCollection.countDocuments({ 
+      authorEmail: post.authorEmail,
+      status: { $ne: 'deleted' }
+    });
+    
+    res.status(201).json({ 
+      _id: result.insertedId, 
+      ...post,
+      postCount: updatedCount,
+      limit: FREE_USER_POST_LIMIT
+    });
+  } catch (error) {
+    console.error("Error creating post:", error);
+    res.status(500).json({ error: "Failed to create post" });
   }
 });
 
