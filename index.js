@@ -3,10 +3,8 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const { ObjectId } = require("mongodb");
-
-// Constants
-const FREE_USER_POST_LIMIT = 5;
-
+const admin = require("firebase-admin");
+const adminRoutes = require("./routes/admin.routes");
 // Load environment variables from .env file
 dotenv.config();
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
@@ -14,8 +12,23 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+const corsOptions = {
+  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  credentials: true,
+  optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
+
+// Firebase
+const serviceAccount = require("./firebase-admin-key.json");
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+// Constants
+const FREE_USER_POST_LIMIT = 5;
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.8puxff9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -31,7 +44,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    await client.connect()
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
@@ -43,6 +56,28 @@ async function run() {
   }
 }
 run().catch(console.dir);
+
+
+
+const verifyFBToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+
+  // verify the token
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.decoded = decoded;
+    next();
+  } catch (error) {
+    return res.status(403).send({ message: "forbidden access" });
+  }
+};
 
 // Stripe Account
 
@@ -67,6 +102,9 @@ const tagsCollection = db.collection("tags");
 const announcementsCollection = db.collection("announcements");
 const usersCollection = db.collection("users");
 const paymentsCollection = db.collection("payments");
+
+// Make collections available to routes
+app.locals.db = db;
 
 // Get user's post count
 app.get("/posts/user/:email/count", async (req, res) => {
@@ -749,31 +787,94 @@ app.post("/create-payment-intent", async (req, res) => {
 });
 
 
-// Store a payment record
+// Store a payment record and update user membership
 app.post("/api/payments", async (req, res) => {
+  const session = client.startSession();
   try {
-    const { email, amount, status, paymentIntentId, date } = req.body;
-    if (!email || !amount || !status || !paymentIntentId) {
-      return res.status(400).json({ error: "Missing required payment fields" });
-    }
-    const payment = {
-      email,
-      amount,
-      status,
-      paymentIntentId,
-      date: date ? new Date(date) : new Date(),
-    };
-    await paymentsCollection.insertOne(payment);
-    res.json({ message: "Payment recorded" });
+    await session.withTransaction(async () => {
+      const { email, amount, status, paymentIntentId, date, membershipType = 'premium' } = req.body;
+
+      if (!email || !amount || !status || !paymentIntentId) {
+        throw new Error("Missing required payment fields");
+      }
+
+      // 1. Record the payment
+      const payment = {
+        email,
+        amount,
+        status,
+        paymentIntentId,
+        membershipType,
+        date: date ? new Date(date) : new Date(),
+      };
+      
+      await paymentsCollection.insertOne(payment, { session });
+
+      // 2. Update user's membership status if payment is successful
+      if (status === 'succeeded') {
+        await usersCollection.updateOne(
+          { email },
+          { 
+            $set: { 
+              membership: membershipType,
+              membershipUpgradedAt: new Date() 
+            },
+            $setOnInsert: {
+              // These fields will only be set if this is a new user
+              email,
+              role: 'member',
+              createdAt: new Date(),
+              lastLogin: new Date()
+            }
+          },
+          { 
+            upsert: true,
+            session
+          }
+        );
+      }
+
+      res.json({ 
+        message: "Payment recorded successfully",
+        membershipUpdated: status === 'succeeded'
+      });
+    });
   } catch (error) {
-    console.error("Error saving payment:", error);
-    res.status(500).json({ error: "Failed to save payment" });
+    console.error("Error processing payment:", error);
+    res.status(500).json({ 
+      error: "Failed to process payment",
+      details: error.message 
+    });
+  } finally {
+    await session.endSession();
   }
 });
 
-// Get payment history for a user
+// Get payments by email (compatibility with client)
+app.get("/api/payments", async (req, res) => {
+  try {
+    const { email } = req.query;
+    
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    const payments = await paymentsCollection
+      .find({ email })
+      .sort({ date: -1 })
+      .toArray();
+
+    res.json(payments);
+  } catch (error) {
+    console.error("Error fetching payments:", error);
+    res.status(500).json({ error: "Failed to fetch payments" });
+  }
+});
+
+// Get payment history for a user (alternative endpoint)
 app.get("/api/payments/history", async (req, res) => {
   try {
+   
     const { email } = req.query;
     if (!email) {
       return res.status(400).json({ error: "Email is required" });
@@ -786,6 +887,94 @@ app.get("/api/payments/history", async (req, res) => {
   } catch (error) {
     console.error("Error fetching payment history:", error);
     res.status(500).json({ error: "Failed to fetch payment history" });
+  }
+});
+
+// app.get("/api/payments/history", verifyFBToken, async (req, res) => {
+//   try {
+//     const { email } = req.query;
+
+//     if (!email) {
+//       return res.status(400).json({ error: "Email is required" });
+//     }
+
+//     // Only allow access to the user who owns the token
+//     if (req.decoded.email !== email) {
+//       return res.status(403).json({ error: "Forbidden: Access denied" });
+//     }
+
+//     const history = await paymentsCollection
+//       .find({ email })
+//       .sort({ date: -1 })
+//       .toArray();
+
+//     res.json(history);
+//   } catch (error) {
+//     console.error("Error fetching payment history:", error);
+//     res.status(500).json({ error: "Failed to fetch payment history" });
+//   }
+// });
+
+
+// Update user role
+app.patch("/api/users/:userId/role", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role } = req.body;
+    
+    if (!['admin', 'member'].includes(role)) {
+      return res.status(400).json({ error: "Invalid role" });
+    }
+
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(userId) },
+      { $set: { role } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({ success: true, message: `User role updated to ${role}` });
+  } catch (error) {
+    console.error("Error updating user role:", error);
+    res.status(500).json({ error: "Failed to update user role" });
+  }
+});
+
+// Get all users (for admin)
+app.get("/api/users", async (req, res) => {
+  try {
+    let users = await usersCollection.find({}, {
+      projection: {
+        _id: 1,
+        email: 1,
+        displayName: 1,
+        photoURL: 1,
+        membership: 1,
+        badge: 1,
+        role: 1,
+        createdAt: 1,
+        lastLogin: 1
+      }
+    }).sort({ createdAt: -1 }).toArray();
+    
+    // Ensure all users have a role (default to 'member' if not set)
+    users = users.map(user => ({
+      ...user,
+      role: user.role || 'member'
+    }));
+    
+    // Map the results to include id as a string
+    const usersWithId = users.map(user => ({
+      ...user,
+      id: user._id.toString()
+    }));
+    
+    res.json(usersWithId);
+  } catch (error) {
+    console.error("Error fetching users:", error);
+    res.status(500).json({ error: "Failed to fetch users" });
   }
 });
 
@@ -888,7 +1077,10 @@ app.get("/", (req, res) => {
   res.send("QckTlk Forum Server is running with mock data!");
 });
 
+// Admin routes
+app.use('/api/admin', adminRoutes);
+
 // Start the server
 app.listen(port, () => {
-  console.log(`Server is listening on port ${port}`);
+  console.log(`Server is running on port ${port}`);
 }) ;
