@@ -608,16 +608,47 @@ app.post("/api/users/upgrade", async (req, res) => {
 });
 
 // Stripe Account (if needed later)
+// app.post("/create-payment-intent", async (req, res) => {
+//   try {
+//     const { amount } = req.body;
+//     // Mock response for development
+//     res.send({ clientSecret: "pi_mock_client_secret_for_development" });
+//   } catch (error) {
+//     console.error("Error creating payment intent:", error);
+//     res.status(500).json({ error: "Failed to create payment intent" });
+//   }
+// });
+
+
+
+
+
 app.post("/create-payment-intent", async (req, res) => {
   try {
-    const { amount } = req.body;
-    // Mock response for development
-    res.send({ clientSecret: "pi_mock_client_secret_for_development" });
+    const { amount, email } = req.body;
+
+    if (!amount || isNaN(amount)) {
+      return res.status(400).json({ error: "Valid amount is required" });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: Number(amount),
+      currency: "usd",
+      metadata: {
+        email: email || "guest@example.com",
+        integration_check: "accept_a_payment"
+      }
+    });
+
+    res.send({
+      clientSecret: paymentIntent.client_secret
+    });
   } catch (error) {
     console.error("Error creating payment intent:", error);
     res.status(500).json({ error: "Failed to create payment intent" });
   }
 });
+
 
 // Store a payment record
 app.post("/api/payments", async (req, res) => {
@@ -674,7 +705,7 @@ app.get("/api/users/profile", async (req, res) => {
         displayName: email.split("@")[0], // Use email prefix as display name
         photoURL: "/default-avatar.svg",
         membership: "free",
-        badge: null,
+        badge: "bronze",
         membershipUpgradedAt: null,
         createdAt: new Date(),
       };
