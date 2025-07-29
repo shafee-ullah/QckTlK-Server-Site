@@ -317,6 +317,10 @@ app.get("/posts/:id", async (req, res) => {
     }
     res.json(post);
   } catch (error) {
+    console.error("Error fetching post:", error);
+    res.status(500).json({ error: "Failed to fetch post" });
+  }
+});
 
 // Get comments for a post
 app.get("/posts/:id/comments", async (req, res) => {
@@ -757,5 +761,4 @@ app.get("/", (req, res) => {
 // Start the server
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
-  console.log("Using mock data for development");
-});
+}) ;
