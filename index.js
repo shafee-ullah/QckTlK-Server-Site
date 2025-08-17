@@ -152,6 +152,24 @@ const canUserCreatePost = async (email) => {
   }
 };
 
+// Get statistics for admin dashboard
+app.get("/api/statistics", async (req, res) => {
+  try {
+    const postsCount = await postsCollection.countDocuments({ status: { $ne: 'deleted' } });
+    const commentsCount = await commentsCollection.countDocuments({});
+    const usersCount = await usersCollection.countDocuments({});
+    
+    res.json({
+      posts: postsCount,
+      comments: commentsCount,
+      users: usersCount
+    });
+  } catch (error) {
+    console.error("Error fetching statistics:", error);
+    res.status(500).json({ error: "Failed to fetch statistics" });
+  }
+});
+
 // Get total post count
 app.get("/posts/count", async (req, res) => {
   try {
@@ -1073,7 +1091,7 @@ app.get("/test-mongo", async (req, res) => {
 
 // Sample route
 app.get("/", (req, res) => {
-  res.send("QckTlk Forum Server is running with mock data!");
+  res.send("QckTlk Forum Server is running");
 });
 
 
