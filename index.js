@@ -3,8 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 const { ObjectId } = require("mongodb");
-const admin = require("firebase-admin");
-const adminRoutes = require("./routes/admin.routes");
+
 // Load environment variables from .env file
 dotenv.config();
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
@@ -12,20 +11,20 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Middleware
-const corsOptions = {
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
-  credentials: true,
-  optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
-};
+// const corsOptions = {
+//   origin: ['http://localhost:5173', 'http://localhost:3000'],
+//   credentials: true,
+//   optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
+// };
 
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(express.json());
 
 // Firebase
-const serviceAccount = require("./firebase-admin-key.json");
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+// const serviceAccount = require("./firebase-admin-key.json");
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+// });
 
 // Constants
 const FREE_USER_POST_LIMIT = 5;
@@ -1077,8 +1076,6 @@ app.get("/", (req, res) => {
   res.send("QckTlk Forum Server is running with mock data!");
 });
 
-// Admin routes
-app.use('/api/admin', adminRoutes);
 
 // Start the server
 app.listen(port, () => {
